@@ -4,6 +4,7 @@ import sys
 import random
 import logging
 import asyncio
+from time import time
 from dataclasses import dataclass
 from argparse import ArgumentParser
 
@@ -53,20 +54,25 @@ async def receive(
     client = await client_manager.authorize()
     sheet = await client.open(sheet_name)
     worksheet = await sheet.get_worksheet(0)
+    logging.info(f'Spreadsheet URL: https://docs.google.com/spreadsheets/d/{sheet.id}')
+    logging.info(f'Listening...')
     while True:
         records = await worksheet.get_all_records()
         queue = await clear_onsets(queue)
+
+        parse_start = time()
         for record in records:
             t = time() - start_time
             try:
                 note = note_from_dict(record)
-                t_event = t // note.loop * note.loop + note.onset
+                t_event = t // note.loop * note.loop + note.onset % note.loop
                 while t_event < t:
                     t_event += note.loop
                 await queue.put((t_event, NOTE_ON, note))
                 logging.debug(f'Note added @ {t_event + note.loop:.3f}: {note}')
             except (ValueError, TypeError) as e:
-                logging.warning(f'Error while parsing row {record}: {e}')
+                logging.debug(f'Error while parsing row {record}: {e}')
+        logging.info(f'Sheet parsed in {(time() - parse_start) * 1000:.3f} ms')
 
 
 async def send(
