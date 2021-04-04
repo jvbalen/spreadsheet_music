@@ -1,30 +1,6 @@
-"""Spreadsheet Music: Google Sheets as a MIDI controller.
+"""Spreadsheet Music.
 
-(c) Jan Van Balen, 2021
-https://jvbalen.github.io
-
-This simple app allows some form of live coding in a spreadsheet by continuously
-parsing a Google Sheet and sending out the results as local MIDI events.
-
-Requirements:
-- macOS
-- gspread_asyncio, simplecoremidi
-- a Google sheets API service account, see:
-  https://gspread.readthedocs.io/en/latest/oauth2.html#for-bots-using-service-account
-- a Google Sheets spreadsheet with read access for service account
-- a DAW with MIDI-in support
-
-## How to use
-- run this file. See argument help for details
-- in your DAW, look for a new MIDI port with the same name as your spreadsheet
-  and make sure you receive MIDI from it
-- make a header row in the Google sheets spreadsheet and include a column named `pitch`
-  and any of the other fields supported by the Note class
-- create notes by adding rows with MIDI-compatible values for each of the fields
-  e.g. pitch and velocity should be between 0 and 127
-
-The async logic in this module is loosely based on the queue example in this tutorial:
-    https://realpython.com/async-io-python/
+Use Google Sheets as a MIDI controller. See README to get started.
 """
 import sys
 import random
