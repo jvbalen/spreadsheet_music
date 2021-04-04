@@ -1,12 +1,39 @@
-"""Spreadsheet Music: using Google Sheets as a MIDI controller
+"""Spreadsheet Music: Google Sheets as a MIDI controller.
+
+(c) Jan Van Balen, 2021
+https://jvbalen.github.io
+
+This simple app allows some form of live coding in a spreadsheet by continuously
+parsing a Google Sheet and sending out the results as local MIDI events.
+
+Requirements:
+- macOS
+- gspread_asyncio, simplecoremidi
+- a Google sheets API service account, see:
+  https://gspread.readthedocs.io/en/latest/oauth2.html#for-bots-using-service-account
+- a Google Sheets spreadsheet with read access for service account
+- a DAW with MIDI-in support
+
+## How to use
+- run this file. See argument help for details
+- in your DAW, look for a new MIDI port with the same name as your spreadsheet
+  and make sure you receive MIDI from it
+- make a header row in the Google sheets spreadsheet and include a column named `pitch`
+  and any of the other fields supported by the Note class
+- create notes by adding rows with MIDI-compatible values for each of the fields
+  e.g. pitch and velocity should be between 0 and 127
+
+The async logic in this module is loosely based on the queue example in this tutorial:
+    https://realpython.com/async-io-python/
 """
 import sys
 import random
 import logging
 import asyncio
 from time import time
+from functools import partial
 from dataclasses import dataclass
-from argparse import ArgumentParser
+from argparse import ArgumentParser, RawDescriptionHelpFormatter
 
 from google.oauth2.service_account import Credentials 
 from gspread_asyncio import AsyncioGspreadClientManager
@@ -33,28 +60,45 @@ async def main(
         midi_out: MIDISource,
         send_interval: float = 0.002,
     ):
+    """Main loop consisting of two asynchronous tasks:
+    - a `receiver` that periodically checks the GSheet and puts notes on a queue
+    - a `sender` that checks the queue and sends NOTE_ON an NOTE_OFF MIDI events
+
+    Args:
+    - sheet_name (str): name of Google Sheet to be parsed
+    - client_manager (AsyncioGspreadClientManager): client manager with creds_fn
+    - midi_out (MIDISource): where to send MIDI events
+    - send_interval (float): minimum interval for sending MIDI messages, in seconds
+    """
     start_time = time()
     queue = asyncio.PriorityQueue()
     receiver = asyncio.create_task(
-        receive(client_manager, sheet_name, queue, start_time=start_time)
+        receive(sheet_name, client_manager, queue, start_time=start_time)
     )
     sender = asyncio.create_task(
         send(queue, midi_out, interval=send_interval, start_time=start_time)
     )
-    await asyncio.gather(receiver)
+    await asyncio.gather(receiver)  # implicitly awaits sender as well
 
 
 async def receive(
-        client_manager: AsyncioGspreadClientManager,
         sheet_name: str,
+        client_manager: AsyncioGspreadClientManager,
         queue: asyncio.PriorityQueue,
         start_time: float = 0.0,
     ) -> None:
+    """Periodically read Google Sheet, parse rows to Note and add to queue.
 
+    Args:
+    - sheet_name (str): name of Google Sheet to be parsed
+    - client_manager (AsyncioGspreadClientManager): client manager with appropriate creds_fn
+    - queue (asyncio.PriorityQueue): priority queue on which to place Note events
+    - start_time (float): time() at the start of playback, optional
+    """
     client = await client_manager.authorize()
     sheet = await client.open(sheet_name)
     worksheet = await sheet.get_worksheet(0)
-    logging.info(f'Spreadsheet URL: https://docs.google.com/spreadsheets/d/{sheet.id}')
+    logging.info(f'Spreadsheet: https://docs.google.com/spreadsheets/d/{sheet.id}')
     logging.info(f'Listening...')
     while True:
         records = await worksheet.get_all_records()
@@ -81,7 +125,19 @@ async def send(
         interval: float = 0.002,
         start_time: float = 0.0,
     ) -> None:
+    """Send out notes from queue as MIDI events
 
+    Not a strict consumer, function also produces new queue items.
+    On every NOTE_ON:
+    - a new NOTE_OFF event is added to queue at t + note.duration
+    - a new NOTE_ON event is added at t + note.loop
+
+    Args:
+    - queue (asyncio.PriorityQueue): priority queue containing Note events
+    - midi_out (MIDISource): where to send MIDI events
+    - interval (float): minimum interval for sending MIDI messages, in seconds
+    - start_time (float): time() at the start of playback, optional
+    """
     while True:
         t = time() - start_time
         t_event, message, note = await queue.get()
@@ -101,9 +157,15 @@ async def send(
             await asyncio.sleep(interval)
 
 
-async def clear_onsets(queue) -> asyncio.PriorityQueue:
+async def clear_onsets(queue: asyncio.PriorityQueue) -> asyncio.PriorityQueue:
+    """Remove all NOTE_ON events from a queue.
 
-    # remove everything but save the offsets
+    TODO: should this be synchronous? Doing this asynchronously might end
+    up removing items that were not yet present when function was called?
+    
+    Args:
+    - queue (asyncio.PriorityQueue)
+    """
     offsets = []
     while not queue.empty():
         t_event, message, note = await queue.get()
@@ -111,55 +173,68 @@ async def clear_onsets(queue) -> asyncio.PriorityQueue:
             offsets.append((t_event, message, note))
 
     # restore the offsets
-    for t_event, message, note in offsets:
-        await queue.put((t_event, message, note))
+    for event in offsets:
+        await queue.put(event)
 
     return queue
 
 
-def note_from_dict(d: dict) -> Note:
+def note_from_dict(record: dict) -> Note:
+    """Parse dictionary representing a Google sheets row, as a Note object
+    Mostly wraps Note(**record), but also drops '' and enforces types, sanity checks.
 
+    Args:
+    - record (dict): spreadsheet row as a dict, with header as keys
+
+    Returns:
+    - Note: spreadsheet note parsed as a Note object
+    """
     types = Note.__annotations__
-    d = {k: types[k](v) for k, v in d.items() if k in types and v != ''}
-    if not len(d):
-        raise ValueError('Empty row')
-    note = Note(**d)
+    record = {k: types[k](v) for k, v in record.items() if k in types and v != ''}
+    note = Note(**record)
+
+    # sanity checks go here
     if note.loop == 0.0:
         raise ValueError('Loop length is zero')
 
     return note
 
 
-def get_credentials() -> Credentials:
+def get_credentials(secrets_file: str) -> Credentials:
     """Callback function that fetches credentials off disk.
 
     gspread_asyncio needs this to re-authenticate when credentials expire. To obtain a
     service account JSON file, follow these steps:
         https://gspread.readthedocs.io/en/latest/oauth2.html#for-bots-using-service-account
+
+    Args:
+    - secrets_file (str): path to json file contain the servive account secrets
     """
-    creds = Credentials.from_service_account_file("client_secret.json")
-    scoped = creds.with_scopes([
+    creds = Credentials.from_service_account_file(secrets_file)
+    creds = creds.with_scopes([
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ])
-    return scoped
+    return creds
 
 
 if __name__ == "__main__":
     
-    parser = ArgumentParser("Spreadsheet Music. Use Google Sheets as a MIDI controller.")
-    parser.add_argument("--sheet-name", "-n", type=str, help="sheet name")
-    parser.add_argument("--receive", "-r", type=float, default=4.0, help="receive interval in seconds")
+    parser = ArgumentParser(description=__doc__, formatter_class=RawDescriptionHelpFormatter)
+    parser.add_argument("--sheet-name", "-n", help="name of Google Sheet to be parsed")
+    parser.add_argument("--secrets-file", "-f", default="client_secret.json", help="secrets file")
+    parser.add_argument("--receive", "-r", type=float, default=2.0, help="receive interval in seconds")
     parser.add_argument("--send", "-s", type=float, default=0.002, help="send interval in seconds")
     parser.add_argument("--debug", "-d", action="store_true", help="set logging level to DEBUG")
     args = parser.parse_args()
 
-    logging_level = logging.DEBUG if args.debug else logging.INFO
-    logging_format, date_format = '%(asctime)s - %(message)s', '%H:%M:%S'
-    logging.basicConfig(stream=sys.stdout, level=logging_level, format=logging_format, datefmt=date_format)
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_format, date_format = '%(asctime)s - %(message)s', '%H:%M:%S'
+    logging.basicConfig(stream=sys.stdout, level=log_level, format=log_format, datefmt=date_format)
 
-    client_manager = AsyncioGspreadClientManager(get_credentials, gspread_delay=args.receive)
+    creds_fn = partial(get_credentials, secrets_file=args.secrets_file)
+    client_manager = AsyncioGspreadClientManager(creds_fn, gspread_delay=args.receive)
     midi_out = MIDISource(args.sheet_name)
     asyncio.run(
         main(args.sheet_name, client_manager, midi_out, send_interval=args.send),
