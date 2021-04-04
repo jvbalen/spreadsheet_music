@@ -26,7 +26,7 @@ How to use:
 - create a Google Sheets spreadsheet with read access for your service account
 - run `main.py -n $SHEET_NAME` (see `python main.py -h` for more options)
 - in your DAW, look for a new MIDI port with the same name as your spreadsheet and make sure to receive MIDI from it
-- add the column label `pitch` to the first row of your spreadhseet, and any of the other ones listed below
+- add the column label `pitch` to the first row of your spreadsheet (plus any of the other fields listed below)
 - create notes by adding rows with MIDI-compatible values for each supported column
   e.g. pitch and velocity should be between 0 and 127
 
