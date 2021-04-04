@@ -15,7 +15,7 @@ parsing a Google Sheet and sending out the results as local MIDI events.
 
 The two main dependencies can be installed with pip:
 ```
-pip install gspread_asyncio simplecoremidi
+pip install gspread-asyncio simplecoremidi
 ```
 
 You will also need to create a Google sheets API service account, see [here](https://gspread.readthedocs.io/en/latest/oauth2.html#for-bots-using-service-account). Save its credentials as `client_secret.json` in this directory.
